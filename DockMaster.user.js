@@ -1,14 +1,9 @@
 // ==UserScript==
 // @name         DockMaster + FC Research Collector
 // @namespace    dockmaster-fc-research
-// @version      5.0
-// ==UserScript==
-// @name         DockMaster + FC Research Collector
-// @namespace    dockmaster-fc-research
-// @version      5.0
+// @version      5.1
 // @updateURL    https://raw.githubusercontent.com/bernardbajv-nijit/Nijit/main/DockMaster.user.js
 // @downloadURL  https://raw.githubusercontent.com/bernardbajv-nijit/Nijit/main/DockMaster.user.js
-// ==/UserScript==
 // @description  Zbiera ISA z DockMaster, otwiera FC Research i kolekcjonuje ASIN-y
 // @match        https://dockmaster.eu.aftx.amazonoperations.app/*
 // @match        https://qifcr.eu.aftx.amazonoperations.app/*
@@ -16,8 +11,8 @@
 // @grant        GM_setValue
 // @grant        GM_deleteValue
 // @grant        GM_addValueChangeListener
-// @grant GM_xmlhttpRequest
-// @connect pandash.eu.aftx.amazonoperations.app
+// @grant        GM_xmlhttpRequest
+// @connect      pandash.eu.aftx.amazonoperations.app
 // @run-at       document-start
 // @noframes
 // ==/UserScript==
