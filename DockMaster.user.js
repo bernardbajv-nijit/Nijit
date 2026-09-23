@@ -2,6 +2,13 @@
 // @name         DockMaster + FC Research Collector
 // @namespace    dockmaster-fc-research
 // @version      5.0
+// ==UserScript==
+// @name         DockMaster + FC Research Collector
+// @namespace    dockmaster-fc-research
+// @version      5.0
+// @updateURL    https://raw.githubusercontent.com/bernardbajv-nijit/Nijit/main/DockMaster.user.js
+// @downloadURL  https://raw.githubusercontent.com/bernardbajv-nijit/Nijit/main/DockMaster.user.js
+// ==/UserScript==
 // @description  Zbiera ISA z DockMaster, otwiera FC Research i kolekcjonuje ASIN-y
 // @match        https://dockmaster.eu.aftx.amazonoperations.app/*
 // @match        https://qifcr.eu.aftx.amazonoperations.app/*
