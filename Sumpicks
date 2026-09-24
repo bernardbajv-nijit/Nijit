@@ -1,0 +1,495 @@
+// ==UserScript==
+// @name         Picking Console: Sum Picks
+// @namespace    https://local
+// @version      1.8
+// @description  Auto full pagination scan (AWSUI lazy reload fix). Hash-detection of full table. Panel appears ONLY after full scan – no flicker.
+// @match        https://picking-console.eu.aftx.amazonoperations.app/fc/*/reports/rollups*
+// @run-at       document-idle
+// @grant        none
+// @downloadURL  https://gist.github.com/Ghuthek/00ed3c18340080647727c8e1e9aa4196/raw/Picking%2520Console:%2520Sum%2520Picks.user.js
+// @updateURL    https://gist.github.com/Ghuthek/00ed3c18340080647727c8e1e9aa4196/raw/Picking%2520Console:%2520Sum%2520Picks.user.js
+
+// ==/UserScript==
+
+(function(){
+'use strict';
+
+/* =======================================================
+   KONFIG
+   ======================================================= */
+
+const HEADER_PROCESS = ['pick process'];
+const HEADER_PICKS   = ['picks'];
+const HEADER_PICK_AREAS = ['pick areas','pick area'];
+const HOV_PROCESS = 'hovpalletpicking';
+
+const LTL_REM_OFFLINE_LABEL = 'LTL/REM/Offline';
+const CUSTOMER_SHIPMENTS_LABEL = 'Customer Shipments';
+const DESTROY_LABEL = 'Destroy';
+
+const DISPLAY_ALL  = 'All';
+const DISPLAY_HIGH = 'High';
+
+
+const SECTION_CS_TITLE  = 'Customer Shipments';
+const SECTION_VRET_TITLE = 'Vret';
+
+const LTL_REM_OFFLINE_SET = new Set([
+    'fracssinglepicking','fracspicking','fracspalletpicking',
+    'fracsofflinepicking','fracsdefaultpicking'
+]);
+
+const CUSTOMER_SHIPMENTS_SET = new Set([
+    'multifloorpicking','multimcfpicking','multisgwpicking',
+    'multizonepicking','picking','pooledhotpicking','qapicking',
+    'singlebulkypicking','singlemcfpicking','singlesgiftwrappicking',
+    'singlespicking','singlesslappicking','hovpalletpicking'
+]);
+
+const DESTROY_SOURCE = 'fracsdestroypicking';
+
+const ALLOWED_OUTPUT = new Set([
+    LTL_REM_OFFLINE_LABEL,
+    CUSTOMER_SHIPMENTS_LABEL,
+    DESTROY_LABEL
+]);
+
+const CUSTOMER_SHIPMENTS_PA_SET = new Set([
+    'pacorrosive2_h','paaerosols2_h','paaerosols2',
+    'paaerosols4_h','paflammables3_h'
+]);
+
+const normalize = s => (s || '').trim().replace(/\s+/g,' ').toLowerCase();
+
+/* =======================================================
+   Normalizacja + Parsowanie
+   ======================================================= */
+function canonicalProcessName(raw){
+    const txt = (raw || '').trim().replace(/\s+/g,' ').toLowerCase();
+    if (!txt) return null;
+
+    let mapped = null;
+
+    if (txt === DESTROY_SOURCE) mapped = DESTROY_LABEL;
+    else if (LTL_REM_OFFLINE_SET.has(txt)) mapped = LTL_REM_OFFLINE_LABEL;
+    else if (CUSTOMER_SHIPMENTS_SET.has(txt)) mapped = CUSTOMER_SHIPMENTS_LABEL;
+
+    if (!mapped || !ALLOWED_OUTPUT.has(mapped)) return null;
+    return mapped;
+}
+
+function parsePicksInt(s){
+    if (!s) return 0;
+    const cleaned = String(s)
+        .replace(/[\u00A0\u202F\s]/g,'')
+        .replace(/[.,]/g,'')
+        .replace(/[^\d-]/g,'');
+    const n = parseInt(cleaned,10);
+    return Number.isFinite(n) ? n : 0;
+}
+
+/* =======================================================
+   Znajdź HTML table / ARIA grid
+   ======================================================= */
+function findHtmlTable(){
+    const tables = Array.from(document.querySelectorAll('table'));
+    for (const table of tables){
+        const thead = table.tHead || table.querySelector('thead');
+        if (!thead) continue;
+
+        const headers = Array.from(thead.querySelectorAll('th,td'))
+            .map(e => normalize(e.textContent));
+
+        const idxProcess = headers.findIndex(h => HEADER_PROCESS.some(t => h.includes(t)));
+        const idxPicks   = headers.findIndex(h => HEADER_PICKS.some(t => h === t || h.includes(t)));
+        const idxAreas   = headers.findIndex(h => HEADER_PICK_AREAS.some(t => h.includes(t)));
+
+        if (idxProcess !== -1 && idxPicks !== -1)
+            return { table, idxProcess, idxPicks, idxAreas };
+    }
+    return null;
+}
+
+function readHtmlTable(info){
+ const { table, idxProcess, idxPicks, idxAreas } = info;
+ const rows = Array.from(table.querySelectorAll('tbody tr'));
+ const map = new Map();
+ let csPickAreasSum = 0;
+ let hovSum = 0;
+
+ for (const tr of rows){
+   const cells = Array.from(tr.cells);
+   if (!cells.length) continue;
+
+   const rawProcess = normalize(cells[idxProcess]?.textContent);
+   const picks = parsePicksInt(cells[idxPicks]?.textContent);
+
+   if (rawProcess === HOV_PROCESS) {
+     hovSum += picks;
+   }
+
+   const proc = canonicalProcessName(cells[idxProcess]?.textContent);
+   if (!proc) continue;
+
+   map.set(proc, (map.get(proc) || 0) + picks);
+
+   if (proc === CUSTOMER_SHIPMENTS_LABEL && idxAreas !== -1){
+     const area = normalize(cells[idxAreas]?.textContent);
+     if (CUSTOMER_SHIPMENTS_PA_SET.has(area))
+       csPickAreasSum += picks;
+   }
+ }
+
+ return { map, csPickAreasSum, hovSum };
+}
+
+/* =======================================================
+   ARIA GRID
+   ======================================================= */
+
+function findAriaGrid(){
+    const grids = Array.from(document.querySelectorAll('[role="grid"],[role="table"]'));
+    for (const grid of grids){
+        const rows = Array.from(grid.querySelectorAll('[role="row"]'));
+        if (!rows.length) continue;
+
+        const headCells = Array.from(rows[0].querySelectorAll('[role="columnheader"],[role="gridcell"],[role="cell"]'));
+        const headers = headCells.map(c => normalize(c.textContent));
+
+        const idxProcess = headers.findIndex(h => HEADER_PROCESS.some(t => h.includes(t)));
+        const idxPicks   = headers.findIndex(h => HEADER_PICKS.some(t => h === t || h.includes(t)));
+        const idxAreas   = headers.findIndex(h => HEADER_PICK_AREAS.some(t => h.includes(t)));
+
+        if (idxProcess !== -1 && idxPicks !== -1)
+            return { grid, idxProcess, idxPicks, idxAreas };
+    }
+    return null;
+}
+
+function readAriaGrid(info){
+ const { grid, idxProcess, idxPicks, idxAreas } = info;
+ const rows = Array.from(grid.querySelectorAll('[role="row"]')).slice(1);
+ const map = new Map();
+ let csPickAreasSum = 0;
+ let hovSum = 0;
+
+ for (const row of rows){
+   const cells = Array.from(row.querySelectorAll('[role="gridcell"],[role="cell"]'));
+   if (!cells.length) continue;
+
+   const rawProcess = normalize(cells[idxProcess]?.textContent);
+   const picks = parsePicksInt(cells[idxPicks]?.textContent);
+
+   if (rawProcess === HOV_PROCESS) {
+     hovSum += picks;
+   }
+
+   const proc = canonicalProcessName(cells[idxProcess]?.textContent);
+   if (!proc) continue;
+
+   map.set(proc, (map.get(proc) || 0) + picks);
+
+   if (proc === CUSTOMER_SHIPMENTS_LABEL && idxAreas !== -1){
+     const area = normalize(cells[idxAreas]?.textContent);
+     if (CUSTOMER_SHIPMENTS_PA_SET.has(area))
+       csPickAreasSum += picks;
+   }
+ }
+
+ return { map, csPickAreasSum, hovSum };
+}
+
+/* =======================================================
+   HASH — pełna sygnatura strony
+   ======================================================= */
+
+function simpleHash(str){
+    let h = 0;
+    for (let i=0; i < str.length; i++){
+        h = (h*31 + str.charCodeAt(i)) | 0;
+    }
+    return h.toString();
+}
+
+function pageSignatureFull(){
+    let rows = [];
+
+    // tabela HTML
+    const trows = Array.from(document.querySelectorAll('tbody tr'));
+    if (trows.length){
+        for (const tr of trows){
+            const text = Array.from(tr.querySelectorAll('td,th'))
+                .map(td => td.textContent.trim()).join('|');
+            rows.push(text);
+        }
+        return "T|" + simpleHash(rows.join('\n'));
+    }
+
+    // grid ARIA
+    const grows = Array.from(document.querySelectorAll('[role="row"]')).slice(1);
+    if (grows.length){
+        for (const r of grows){
+            const text = Array.from(r.querySelectorAll('[role="gridcell"],[role="cell"]'))
+                .map(td => td.textContent.trim()).join('|');
+            rows.push(text);
+        }
+        return "G|" + simpleHash(rows.join('\n'));
+    }
+
+    return "EMPTY";
+}
+
+async function waitForPageChangeFull(prevSig, timeoutMs=9000){
+    const start = Date.now();
+    while (Date.now() - start < timeoutMs){
+        await new Promise(r => setTimeout(r,150));
+        const sig = pageSignatureFull();
+        if (sig !== prevSig && sig !== "EMPTY") return true;
+    }
+    return false;
+}
+
+/* =======================================================
+   PAGINACJA AWS UI
+   ======================================================= */
+function getAwsPagination(){
+    const container = document.querySelector('ul.awsui-table-pagination-content');
+    if (!container) return null;
+
+    const nextBtn = () =>
+        container.querySelector('li.awsui-table-pagination-next-page button');
+
+    const isDisabled = btn =>
+        !btn || btn.disabled || btn.getAttribute('aria-disabled') === 'true' || btn.tabIndex === -1;
+
+    return { nextBtn, isDisabled };
+}
+
+/* =======================================================
+   NOWE → pełne skanowanie NEXT
+   ======================================================= */
+async function scanPaginatedByNextButton(){
+    const pag = getAwsPagination();
+    if (!pag) return null;
+
+    const map = new Map();
+    let csPickAreasSum = 0;
+    let hovSum = 0;
+
+    let prevSig = null;
+    let loops = 0;
+
+    while (true){
+        loops++;
+        if (loops > 250) break;
+
+        const sig = pageSignatureFull();
+        if (sig === prevSig) break;
+        prevSig = sig;
+
+        // ZBIERZ STRONĘ
+        let partial = null;
+
+        const h = findHtmlTable();
+        if (h) partial = readHtmlTable(h);
+        else {
+            const g = findAriaGrid();
+            if (g) partial = readAriaGrid(g);
+        }
+
+        if (partial && partial.map){
+            for (const [k,v] of partial.map.entries())
+                map.set(k, (map.get(k)||0) + v);
+
+            csPickAreasSum += partial.csPickAreasSum || 0;
+            hovSum += partial.hovSum ?? 0;
+
+        }
+
+        // NEXT
+        const next = pag.nextBtn();
+        if (!next || pag.isDisabled(next)) break;
+
+        next.click();
+        await waitForPageChangeFull(sig, 9000);
+    }
+
+    return { map, csPickAreasSum, hovSum };
+}
+
+/* =======================================================
+   computeData
+   ======================================================= */
+
+function computeData(){
+    const h = findHtmlTable();
+    if (h) return readHtmlTable(h);
+
+    const g = findAriaGrid();
+    if (g) return readAriaGrid(g);
+
+    return null;
+}
+
+/* =======================================================
+   UI – panel
+   ======================================================= */
+function addRow(tbody,label,val){
+    const tr = document.createElement('tr');
+    tr.innerHTML = `
+<td style="padding:10px; font-size:14px; border-bottom:1px solid #1f2937;">${label}</td>
+<td style="padding:10px; font-size:14px; text-align:right; border-bottom:1px solid #1f2937;">${(val||0).toLocaleString()}</td>`;
+    tbody.appendChild(tr);
+}
+
+function addSectionHeader(tbody,title){
+    const tr = document.createElement('tr');
+    tr.innerHTML = `
+<td colspan="2" style="padding:10px; font-size:15px; font-weight:600; text-align:center; border-bottom:1px solid #334155;">
+ ${title}
+</td>`;
+    tbody.appendChild(tr);
+}
+
+function renderPanel(data){
+    document.getElementById('tm-picks-summary-panel')?.remove();
+
+    const { map, csPickAreasSum, hovSum } = data;
+    const cs   = map.get(CUSTOMER_SHIPMENTS_LABEL) || 0;
+
+    const ltl  = map.get(LTL_REM_OFFLINE_LABEL) || 0;
+      const dst  = map.get(DESTROY_LABEL) || 0;
+
+    const panel = document.createElement('div');
+    panel.id = 'tm-picks-summary-panel';
+    panel.style.cssText = `
+        position:fixed; bottom:16px; right:16px; z-index:999999;
+        background:#0f172a; color:#e2e8f0; border:1px solid #334155;
+        border-radius:8px; max-height:70vh; overflow:auto; min-width:380px;`;
+
+    const header = document.createElement('div');
+    header.style.cssText = `display:flex; justify-content:space-between; padding:10px;
+        font-size:15px; border-bottom:1px solid #334155; align-items:center;`;
+    header.innerHTML = `
+<strong>Pick Process</strong>
+<div style="display:flex; gap:6px;">
+ <button id="tm-scan" style="padding:4px 8px; background:#1e293b; color:#e2e8f0; border:1px solid #334155; border-radius:6px;">Skanuj (pełny)</button>
+ <button id="tm-refresh" style="padding:4px 8px; background:#1e293b; color:#e2e8f0; border:1px solid #334155; border-radius:6px;">Odśwież</button>
+ <button id="tm-close" style="padding:4px 8px; background:#1e293b; color:#e2e8f0; border:1px solid #334155; border-radius:6px;">×</button>
+</div>`;
+    panel.appendChild(header);
+
+    const table = document.createElement('table');
+    table.style.cssText = 'width:100%; border-collapse:collapse;';
+    table.innerHTML = `
+<thead>
+<tr>
+<td style="padding:10px; border-bottom:1px solid #334155;">Kategoria</td>
+<td style="padding:10px; border-bottom:1px solid #334155; text-align:right;">Picks</td>
+</tr>
+</thead>`;
+    const tbody = document.createElement('tbody');
+
+    if (cs > 0 || csPickAreasSum > 0) addSectionHeader(tbody, SECTION_CS_TITLE);
+    if (cs > 0) addRow(tbody, DISPLAY_ALL, cs);
+
+
+// NEW: Floor = All - High
+if (cs > 0) {
+    const floor = cs - (csPickAreasSum || 0);
+    addRow(tbody, "Floor", floor);
+}
+    if (csPickAreasSum > 0) addRow(tbody, DISPLAY_HIGH, csPickAreasSum);
+if (hovSum > 0) addRow(tbody, "HOV", hovSum);
+   if (dst > 0 || ltl > 0) addSectionHeader(tbody, SECTION_VRET_TITLE);
+
+// NEW → Vret Total
+const vretTotal = (dst || 0) + (ltl || 0);
+if (vretTotal > 0) addRow(tbody, "Vret Total", vretTotal);
+if (ltl > 0) addRow(tbody, LTL_REM_OFFLINE_LABEL, ltl);
+if (dst > 0) addRow(tbody, DESTROY_LABEL, dst);
+
+``
+
+    if (tbody.children.length === 0){
+        const tr = document.createElement('tr');
+        tr.innerHTML = `<td colspan="2" style="padding:10px; text-align:center;">Brak danych</td>`;
+        tbody.appendChild(tr);
+    }
+
+    table.appendChild(tbody);
+    panel.appendChild(table);
+    document.body.appendChild(panel);
+
+    document.getElementById('tm-close').onclick = () => panel.remove();
+    document.getElementById('tm-refresh').onclick = () => generate();
+
+    document.getElementById('tm-scan').onclick = async ev => {
+        const btn = ev.currentTarget;
+        btn.disabled = true;
+        const orig = btn.textContent;
+        btn.textContent = "Skanowanie...";
+
+        observer.disconnect();
+
+        try {
+            let dataFull = await scanPaginatedByNextButton();
+            if (!dataFull) dataFull = computeData();
+            if (dataFull && dataFull.map?.size) renderPanel(dataFull);
+            else generate();
+        } finally {
+            btn.disabled = false;
+            btn.textContent = orig;
+            observer.observe(document.body, {subtree:true, childList:true});
+        }
+    };
+}
+
+/* =======================================================
+   AUTO-START — NO FLASH PANEL
+   ======================================================= */
+
+async function waitAndStartFullScan_NoFlash(){
+    // Czekamy aż tabela w ogóle istnieje
+    let tries = 0;
+    while (!computeData() && tries < 60){
+        await new Promise(r => setTimeout(r,300));
+        tries++;
+    }
+
+    if (!computeData()) return;
+
+    // Pełne skanowanie bez panelu
+    let dataFull = await scanPaginatedByNextButton();
+    if (!dataFull) dataFull = computeData();
+
+    // Dopiero teraz renderujemy panel → 0 migania
+    renderPanel(dataFull);
+
+    // Aktywujemy observer dopiero po utworzeniu panelu
+    observer.observe(document.body, { subtree:true, childList:true });
+}
+
+/* =======================================================
+   OBSERVER
+   ======================================================= */
+const observer = new MutationObserver(() => {
+    clearTimeout(observer._t);
+    observer._t = setTimeout(() => {
+        if (document.getElementById('tm-picks-summary-panel'))
+            generate();
+    },300);
+});
+
+function generate(){
+    const d = computeData();
+    if (d) renderPanel(d);
+}
+
+/* =======================================================
+   START
+   ======================================================= */
+if (location.pathname.match(/\/fc\/[^/]+\/reports\/rollups/))
+    waitAndStartFullScan_NoFlash();
+
+})();
