@@ -1,12 +1,13 @@
 // ==UserScript==
 // @name         DockMaster + FC Research Collector
 // @namespace    dockmaster-fc-research
-// @version      5.1
+// @version      5.2
 // @updateURL    https://raw.githubusercontent.com/bernardbajv-nijit/Nijit/main/DockMaster.user.js
 // @downloadURL  https://raw.githubusercontent.com/bernardbajv-nijit/Nijit/main/DockMaster.user.js
 // @description  Zbiera ISA z DockMaster, otwiera FC Research i kolekcjonuje ASIN-y
 // @match        https://dockmaster.eu.aftx.amazonoperations.app/*
 // @match        https://qifcr.eu.aftx.amazonoperations.app/*
+// @match https://idx.eu.aftx.amazonoperations.app/*
 // @grant        GM_getValue
 // @grant        GM_setValue
 // @grant        GM_deleteValue
@@ -31,7 +32,7 @@
             'https://qifcr.eu.aftx.amazonoperations.app/XDR1/results?s=',
 
         dockMasterHost:
-            'dockmaster.eu.aftx.amazonoperations.app',
+            'idx.eu.aftx.amazonoperations.app',
 
         fcResearchHost:
             'qifcr.eu.aftx.amazonoperations.app',
