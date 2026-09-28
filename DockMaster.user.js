@@ -77,7 +77,7 @@
 
         console.log.apply(
             console,
-            ['[DM+FC COLLECTOR]'].concat(args)
+            ['[DM+parseASIN( COLLECTOR]'].concat(args)
         );
     }
 
@@ -576,6 +576,7 @@ function saveASIN(
     canceled,
     received,
     overage
+    vendorCode
 ) {
     asin = parseASIN(asin);
 
@@ -633,6 +634,14 @@ function saveASIN(
                   previous.received !== undefined
                     ? previous.received
                     : null,
+        vendorCode:
+    vendorCode ||
+    (
+        previous &&
+        previous.vendorCode
+            ? previous.vendorCode
+            : ''
+    ),
 
         /*
          * Jednostki overage.
@@ -949,6 +958,7 @@ dropZone:
             canceled,
             received,
             overage
+            vendorCode
         );
     });
 }
@@ -1491,6 +1501,8 @@ function scanFCResearchPage() {
                 parseASIN(
                     cells[1].innerText
                 );
+            const vendorCode =
+    cells[2].innerText.trim();
 
             if (!asin) {
                 return;
@@ -1950,7 +1962,7 @@ function exportASINData() {
     'Canceled',
     'Received',
     'Overage',
-
+'Vendor Code',
     'Hazmat PL',
     'Hazmat DE',
 
@@ -1977,6 +1989,7 @@ rows.push([
     asinRecord.canceled,
     asinRecord.received,
     asinRecord.overage,
+    asinRecord.vendorCode
 
 asinRecord.hazmatLevelPL || '',
 asinRecord.hazmatLevelDE || '',
