@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         DockMaster + FC Research Collector
 // @namespace    dockmaster-fc-research
-// @version      5.6
+// @version      5.7
 // @updateURL    https://raw.githubusercontent.com/bernardbajv-nijit/Nijit/main/DockMaster.user.js
 // @downloadURL  https://raw.githubusercontent.com/bernardbajv-nijit/Nijit/main/DockMaster.user.js
 // @description  Zbiera ISA z DockMaster, otwiera FC Research i kolekcjonuje ASIN-y
@@ -1358,28 +1358,88 @@ function scanDockMasterPage() {
 
     try {
 
-        const matches =
-            document.body.innerText.match(
-                /\b\d{11}\b/g
-            ) || [];
+        const appointments =
+            document.querySelectorAll(
+                '[aria-label*="Appointment"]'
+            );
 
-        Array.from(
-            new Set(matches)
-        ).forEach(function (isa) {
+        let found = 0;
+
+        appointments.forEach(function (element) {
+
+            if (
+                element.id === 'dm-fc-widget' ||
+                element.closest('#dm-fc-widget')
+            ) {
+                return;
+            }
+
+            const text =
+                element.getAttribute(
+                    'aria-label'
+                ) || '';
+
+            const isaMatch =
+                text.match(
+                    /\b(\d{11})\b/
+                );
+
+            if (!isaMatch) {
+                return;
+            }
+
+            const palletMatch =
+                text.match(
+                    /P:(\d+)/i
+                );
+
+            const cartonMatch =
+                text.match(
+                    /C:(\d+)/i
+                );
+
+            const unitMatch =
+                text.match(
+                    /U:(\d+)/i
+                );
 
             saveISA(
-                isa,
-                null,
-                null,
-                null
+                isaMatch[1],
+
+                palletMatch
+                    ? Number(
+                        palletMatch[1]
+                    )
+                    : null,
+
+                cartonMatch
+                    ? Number(
+                        cartonMatch[1]
+                    )
+                    : null,
+
+                unitMatch
+                    ? Number(
+                        unitMatch[1]
+                    )
+                    : null
             );
+
+            found++;
 
         });
 
         log(
             'IDX scan:',
-            matches.length,
-            'ISA found'
+            found,
+            'appointments found'
+        );
+
+    } catch (error) {
+
+        log(
+            'scanDockMasterPage error:',
+            error
         );
 
     } finally {
