@@ -957,8 +957,7 @@ dropZone:
             unfilled,
             canceled,
             received,
-            overage
-            vendorCode
+            overage,
         );
     });
 }
@@ -1938,6 +1937,7 @@ function exportASINData() {
                 record.canceled,
                 record.received,
                 record.overage,
+                record.vendorCode,
                 record.source,
                 record.discoveredAt
             ]);
@@ -1990,7 +1990,7 @@ rows.push([
     asinRecord.canceled,
     asinRecord.received,
     asinRecord.overage,
-    asinRecord.vendorCode
+    asinRecord.vendorCode,
 
 asinRecord.hazmatLevelPL || '',
 asinRecord.hazmatLevelDE || '',
