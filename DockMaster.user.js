@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         DockMaster + FC Research Collector
 // @namespace    dockmaster-fc-research
-// @version      5.5
+// @version      5.6
 // @updateURL    https://raw.githubusercontent.com/bernardbajv-nijit/Nijit/main/DockMaster.user.js
 // @downloadURL  https://raw.githubusercontent.com/bernardbajv-nijit/Nijit/main/DockMaster.user.js
 // @description  Zbiera ISA z DockMaster, otwiera FC Research i kolekcjonuje ASIN-y
@@ -1344,104 +1344,50 @@ dropZone:
     /******************************************************************
      * SKANOWANIE DOCKMASTER
      ******************************************************************/
+function scanDockMasterPage() {
 
-    function scanDockMasterPage() {
-        if (
-            !IS_DOCKMASTER ||
-            !document.body ||
-            scanInProgress
-        ) {
-            return;
-        }
-
-        scanInProgress = true;
-
-        try {
-            const selectors = [
-                'tr',
-                'li',
-                'article',
-                '[role="row"]',
-                '[role="gridcell"]',
-                '[class*="card"]',
-                '[class*="appointment"]',
-                '[data-testid]'
-            ].join(',');
-
-            const elements =
-                document.querySelectorAll(
-                    selectors
-                );
-
-            elements.forEach(function (
-                element
-            ) {
-                if (
-                    element.id ===
-                        'dm-fc-widget' ||
-                    element.closest(
-                        '#dm-fc-widget'
-                    )
-                ) {
-                    return;
-                }
-
-                const text =
-                    element.innerText ||
-                    element.textContent ||
-                    '';
-
-                const isaMatch =
-                    text.match(
-                        /\b(\d{11})\b/
-                    );
-
-                if (!isaMatch) {
-                    return;
-                }
-
-                const palletMatch =
-                    text.match(
-                        /(?:pallets?|plt|p)\s*[:\-]?\s*(\d+)/i
-                    );
-
-                const cartonMatch =
-                    text.match(
-                        /(?:cartons?|cases?|ctn|c)\s*[:\-]?\s*(\d+)/i
-                    );
-
-                const unitMatch =
-                    text.match(
-                        /(?:units?|qty|u)\s*[:\-]?\s*(\d+)/i
-                    );
-
-                saveISA(
-                    isaMatch[1],
-
-                    palletMatch
-                        ? parseNumber(
-                              palletMatch[1]
-                          )
-                        : null,
-
-                    cartonMatch
-                        ? parseNumber(
-                              cartonMatch[1]
-                          )
-                        : null,
-
-                    unitMatch
-                        ? parseNumber(
-                              unitMatch[1]
-                          )
-                        : null
-                );
-            });
-        } finally {
-            scanInProgress = false;
-        }
+    if (
+        !IS_DOCKMASTER ||
+        !document.body ||
+        scanInProgress
+    ) {
+        return;
     }
 
+    scanInProgress = true;
+
+    try {
+
+        const matches =
+            document.body.innerText.match(
+                /\b\d{11}\b/g
+            ) || [];
+
+        Array.from(
+            new Set(matches)
+        ).forEach(function (isa) {
+
+            saveISA(
+                isa,
+                null,
+                null,
+                null
+            );
+
+        });
+
+        log(
+            'IDX scan:',
+            matches.length,
+            'ISA found'
+        );
+
+    } finally {
+
+        scanInProgress = false;
+
+    }
+}
     /******************************************************************
      * SKANOWANIE FC RESEARCH
      ******************************************************************/
