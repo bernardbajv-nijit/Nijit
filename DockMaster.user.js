@@ -1535,7 +1535,8 @@ function scanFCResearchPage() {
                 unfilled,
                 canceled,
                 received,
-                overage
+                overage,
+                vendorCode
             );
 
             savedRows++;
