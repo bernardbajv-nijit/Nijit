@@ -575,7 +575,7 @@ function saveASIN(
     unfilled,
     canceled,
     received,
-    overage
+    overage,
     vendorCode
 ) {
     asin = parseASIN(asin);
