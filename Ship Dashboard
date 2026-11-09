@@ -1,1 +1,1014 @@
-1
+// ==UserScript==
+// @name         Ship Dashboard
+// @namespace    https://your.namespace.example
+// @version      2.0
+// @description  Dashboard with per-Lane grouping split by CPTs date (auto-login + high-contrast TV styling; 12 lanes on 1080p, no scrollbars; 60pt A/B trendlines)
+// @match        https://www.amazonlogistics.eu/ssp/dock/hrz/cpt*
+// @match        https://www.amazonlogistics.eu/ap/*
+// @run-at       document-idle
+// @noframes
+// @grant        GM_addStyle
+// @grant        GM_setValue
+// @grant        GM_getValue
+// @grant        GM_registerMenuCommand
+// @grant        GM_openInTab
+
+// ==/UserScript==
+
+/***** FLOWRATE (z innego skryptu) *****/
+const FLOWRATE_KEY = 'flowrate_snapshot';
+
+const FLOWRATE_URL = 'https://www.amazonlogistics.eu/sortcenter/flowrate';
+const FLOWRATE_STALE_MS = 2 * 60 * 1000; // 2 min
+let lastFlowrateOpen = 0;
+let flowrateTab = null;
+let managedTabs = [];
+
+const FLOWRATE_ALIVE_MS = 90 * 1000; // 1.5 min
+
+function closeAllManagedTabs() {
+    managedTabs = managedTabs.filter(tab => {
+        try {
+            if (tab && !tab.closed) {
+                tab.close();
+                return false;
+            }
+        } catch (e) {
+            console.warn('Close tab error', e);
+        }
+        return false;
+    });
+}
+
+function isFlowrateAlive() {
+  const last = Number(localStorage.getItem('flowrate_alive'));
+  if (!last) return false;
+  return Date.now() - last < FLOWRATE_ALIVE_MS;
+}
+
+function ensureFlowrateIfStale() {
+    const now = Date.now();
+
+    // Jeśli Flowrate żyje – nic nie rób
+    if (isFlowrateAlive()) {
+        return;
+    }
+
+    // throttle 5 min
+    if (now - lastFlowrateOpen <= 5 * 60 * 1000) {
+        return;
+    }
+
+    console.log('[Dashboard] Flowrate inactive → opening tab');
+
+    lastFlowrateOpen = now;
+  // ✅ Zamknij WSZYSTKIE stare zakładki otwarte przez skrypt
+closeAllManagedTabs();
+
+    // ✅ Otwórz nową i zapamiętaj uchwyt
+  flowrateTab = GM_openInTab(FLOWRATE_URL, {
+    active: false,
+    insert: true,
+});
+
+managedTabs.push(flowrateTab);
+
+}
+
+function getFlowrateSnapshot() {
+  return GM_getValue(FLOWRATE_KEY, null);
+}
+
+(function () {
+  'use strict';
+
+  /***** Utils *****/
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+  const norm = (t) => (String(t || '')).replace(/\s+/g, ' ').trim();
+  const digitsOnly = (s) => (String(s || '')).replace(/[^\d]/g, '');
+  const toInt = (s) => { const d = digitsOnly(s); return d ? parseInt(d, 10) || 0 : 0; };
+  const parseP = (text) => {
+    const m = String(text || '').match(/P\s*:?\s*([\d\s.,]+)/i);
+    if (!m) return 0;
+    const raw = m[1].replace(/\s+/g, '').replace(/[,.]/g, '');
+    return parseInt(raw, 10) || 0;
+  };
+  const fmt = (n) => (n || 0).toLocaleString('pl-PL');
+
+  /*** Dekodowanie encji HTML ***/
+  function decodeHtmlEntities(str) {
+    const ta = document.createElement('textarea');
+    ta.innerHTML = String(str ?? '');
+    return ta.value;
+  }
+
+    function updateFlowrateKPI() {
+  const snap = getFlowrateSnapshot();
+  const valEl = document.getElementById('kpiFlowrate');
+  const subEl = document.getElementById('kpiFlowrateSub');
+
+  if (!snap || !snap.totals) {
+    valEl.textContent = '—';
+    subEl.textContent = 'Brak danych';
+    return;
+  }
+
+  const ok = snap.totals.successful || 0;
+  const fail = snap.totals.failed || 0;
+  const total = ok ;
+
+  valEl.textContent = total.toLocaleString('pl-PL');
+  subEl.textContent = `${fail.toLocaleString()} Failed Scans`;
+}
+
+  /** Sanityzacja lane **/
+  function sanitizeLaneStrong(raw) {
+    let s = decodeHtmlEntities(raw ?? '');
+    try { s = s.normalize('NFKC'); } catch {}
+    s = s.replace(/[\u2010-\u2015\u2212\uFE58\uFE63\uFF0D]/g, '-');
+    s = s.replace(/[→⇒➔➜➝➞➟➠➤➧]/g, '->').replace(/\s*-\s*\>\s*/g, '->');
+    s = s
+      .replace(/[\u200B-\u200D\u2060\uFEFF]/g, '')
+      .replace(/[\u202A-\u202E\u2066-\u2069\u200E\u200F\u061C]/g, '')
+      .replace(/\u00A0/g, ' ')
+      .replace(/[\x00-\x1F\x7F]/g, '');
+    s = s.replace(/-?[A-Fa-f0-9]{8}-(?:[A-Fa-f0-9]{4}-){3}[A-Fa-f0-9]{12}(?=\b|$)/g, '');
+    s = s.replace(/-?[A-Fa-f0-9]{32}(?=\b|$)/g, '');
+    s = s.replace(/--+/g, '-')
+      .replace(/-+\>/g, '->')
+      .replace(/\>+-/g, '->')
+      .replace(/\s+/g, ' ')
+      .trim();
+    s = s.replace(/\s*->\s*/g, '->');
+    return s;
+  }
+
+  function fullLaneLabelFromCell(cellText) { return sanitizeLaneStrong(cellText || ''); }
+  function laneAfterArrow(fullSanitized) { const i = fullSanitized.indexOf('->'); return i >= 0 ? fullSanitized.slice(i + 2) : fullSanitized; }
+  function displayLaneLabel(fullLabel) {
+    const s = sanitizeLaneStrong(fullLabel || '');
+    const core = stripLanePrefix(laneAfterArrow(s));
+    if (/^DE08-DEPO-REINSDOR-DE-H1$/i.test(core)) return 'DEPO';
+    if (/^UPS-LEGNICA-PL-H1$/i.test(core)) return 'UPS';
+    if (/^POPL-ZGORZELE-PL-H1$/i.test(core)) return 'POPL';
+    if (/^DP01-DP-OTTENDOR-DE-H1$/i.test(core)) return 'DHL';
+    if (/^DE04-DEPO-RADEFELD-DE-H1$/i.test(core)) return 'RADEFELD';
+    return core;
+  }
+
+  /***** STYLE – wysokokontrastowy; układ 3×4 bez przewijania na 1920×1080 + sparklines *****/
+GM_addStyle(`
+:root{
+  --bg:#05080f;
+  --panel:#0a1222;
+  --fg:#ffffff;
+  --muted:#d8e6ff;
+  --accent:#7CC7FF;
+  --accent2:#44E1A0;
+  --danger:#ff6b6b;
+  --stroke:#000C;
+  --shadow:rgba(0,0,0,.5);
+
+  --kpiRadius:14px;
+
+  --fs-title:clamp(20px,3.0vw,48px);
+  --fs-big:clamp(34px,5.4vw,96px);
+  --fs-mid:clamp(18px,1.9vw,30px);
+  --fs-small:clamp(14px,1.2vw,22px);
+
+  --gap:clamp(8px,0.9vw,16px);
+  --pad:clamp(8px,0.9vw,16px);
+}
+
+html, body {
+  height:100%;
+  overflow:hidden !important;
+}
+
+/* ===== ROOT ===== */
+#cptDash{
+  position:fixed;
+  inset:0;
+  z-index:999999;
+  display:flex;
+  flex-direction:column;
+  gap:var(--gap);
+  padding:var(--pad);
+  background:var(--bg);
+  color:var(--fg);
+  font-family:system-ui, Segoe UI, Roboto, Arial, sans-serif;
+}
+
+/* ===== KPI GRID (KLUCZOWE) ===== */
+#cptKPIs{
+  display:grid;
+  grid-template-columns: 0.9fr 1.1fr 1.1fr 0.9fr;
+  grid-auto-rows: 180px;
+  gap:var(--gap);
+  align-items:stretch;
+  margin:0;
+}
+
+/* KPI – wspólny box model */
+#cptKPIs > .kpi,
+#cptKPIs > .kpiMini{
+  height:100%;
+  min-height:unset !important;
+  display:flex;
+  flex-direction:column;
+  align-items:center;
+  justify-content:center;
+  text-align:center;
+
+  border-radius:var(--kpiRadius);
+  border:1px solid rgba(126,161,255,.28);
+  background:linear-gradient(180deg, #0f1a35, #0c162e);
+  box-shadow:
+    0 6px 18px rgba(0,0,0,.35),
+    inset 0 0 28px rgba(90,140,255,.07);
+
+  padding:clamp(8px, 0.8vw, 16px);
+  color:var(--muted);
+  position:relative;
+}
+
+/* KPI tekst */
+.kpi .label, .kpiMini .label{
+  font-weight:900;
+  letter-spacing:.3px;
+  font-size:var(--fs-mid);
+}
+
+.kpi .value, .kpiMini .value{
+  margin-top:.2em;
+  font-weight:1000;
+  line-height:1.0;
+  color:var(--fg);
+  font-size:var(--fs-big);
+  text-shadow:
+    0 0 0 var(--stroke),
+    0 2px 10px var(--shadow);
+}
+
+/* sparkline NIE rozpycha kafelka */
+.sparkWrap{
+  width:100%;
+  margin-top:.35em;
+  flex:0 0 auto;
+}
+
+.spark{
+  width:100%;
+  height:28px;
+  display:block;
+  opacity:.95;
+}
+
+/* ===== CARDS ===== */
+#cptCardsWrap{
+  position:relative;
+  flex:1 1 auto;
+  border:1px solid #263655;
+  border-radius:12px;
+  background:var(--panel);
+  overflow:hidden;
+  padding:var(--pad);
+}
+
+#cptUnknownAlert{
+  position:absolute;
+  top:8px;
+  left:50%;
+  transform:translateX(-50%);
+  z-index:50;
+  max-width:90%;
+  padding:7px 14px;
+  border:2px solid #ffd43b;
+  border-radius:9px;
+  background:#3b2f00;
+  color:#fff3bf;
+  font-size:var(--fs-small);
+  font-weight:1000;
+  text-align:center;
+  box-shadow:0 5px 14px rgba(0,0,0,.45);
+}
+
+#cptCards{
+  display:grid;
+  grid-template-columns:repeat(4, 1fr);
+  grid-auto-rows:1fr;
+  gap:var(--gap);
+  height:100%;
+}
+
+.cpt-card{
+  position:relative;
+  display:flex;
+  flex-direction:column;
+  align-items:center;
+  justify-content:center;
+  text-align:center;
+
+  border:1px solid #263b67;
+  border-radius:12px;
+  background:linear-gradient(180deg, #0f1a35, #0c162e);
+  box-shadow:
+    0 6px 14px rgba(0,0,0,.32),
+    inset 0 0 18px rgba(80,120,200,.06);
+
+  padding:clamp(6px, 0.9vw, 14px);
+}
+
+.cpt-card .lane{
+  font-size:var(--fs-title);
+  font-weight:1000;
+  letter-spacing:.3px;
+  color:var(--fg);
+  text-shadow:
+    0 0 0 var(--stroke),
+    0 3px 10px var(--shadow);
+}
+
+.cpt-card .val{
+  font-size:var(--fs-big);
+  font-weight:1000;
+  color:var(--fg);
+  line-height:1.0;
+  text-shadow:
+    0 0 0 var(--stroke),
+    0 3px 9px var(--shadow);
+}
+
+.cpt-card .time{
+  margin-top:.1em;
+  font-size:var(--fs-mid);
+  font-weight:900;
+  color:var(--muted);
+}
+
+/* urgent */
+.cpt-card.urgent .lane,
+.cpt-card.urgent .val{
+  color:var(--danger) !important;
+}
+
+/* ===== BADGES ===== */
+.cpt-badge{
+  position:absolute;
+  top:8px;
+  right:10px;
+  z-index:20;
+  font-weight:1000;
+  font-size:clamp(20px,1.8vw,30px);
+  padding:.15em .55em;
+  border-radius:999px;
+  color:#fff;
+  border:3px solid #fff;
+  background:#000;
+  box-shadow:
+    0 0 0 3px rgba(0,0,0,.25),
+    0 6px 16px rgba(0,0,0,.45);
+}
+
+.cpt-badge.A{
+  background:#0ea85a;
+  border-color:#0ea85a;
+}
+
+.cpt-badge.B{
+  background:#0b74ff;
+  border-color:#0b74ff;
+}
+
+.cpt-badge.unknown{
+  background:#ffd43b;
+  border-color:#ffd43b;
+  color:#161616;
+}
+
+/* ===== KPI COLORS ===== */
+#kpiLaneALeft{
+  background:linear-gradient(180deg,#0e2b20,#0a2018);
+  border-color:rgba(14,168,90,.6);
+}
+
+#kpiLaneALeft .label,
+#kpiLaneALeft .value{
+  color:#d7ffea;
+}
+
+#kpiLaneBRight{
+  background:linear-gradient(180deg,#0e1f3b,#0a172c);
+  border-color:rgba(11,116,255,.6);
+}
+
+#kpiLaneBRight .label,
+#kpiLaneBRight .value{
+  color:#e3f1ff;
+}
+`);
+
+  /***** Trend A/B (60 ostatnich odświeżeń) *****/
+  const TREND_KEY = 'cpt_trend_v1';
+  const Trend = {
+    get data(){ return GM_getValue(TREND_KEY, {A:[], B:[]}); },
+    set data(v){ GM_setValue(TREND_KEY, v); },
+    push(a,b){ const d=this.data; d.A.push(a); d.B.push(b); if(d.A.length>60) d.A = d.A.slice(-60); if(d.B.length>60) d.B = d.B.slice(-60); this.data=d; },
+    clear(){ GM_setValue(TREND_KEY, {A:[],B:[]}); },
+    setupMenu(){ GM_registerMenuCommand('CPT: Wyczyść trend (A/B)', ()=>{ this.clear(); alert('Trend wyczyszczony.'); }); }
+  };
+  Trend.setupMenu();
+
+function drawSpark() { return; }
+
+  /***** Login Guard *****/
+  const LOGIN_CFG_KEY = 'cpt_login_cfg';
+  const Login = {
+    get cfg() { return GM_getValue(LOGIN_CFG_KEY, { user: '', pass: '', enabled: false }); },
+    set cfg(val) { GM_setValue(LOGIN_CFG_KEY, val); },
+    setupMenu() {
+      GM_registerMenuCommand('CPT: Ustaw dane logowania', () => {
+        const user = prompt('E-mail (Amazon):', this.cfg.user || '');
+        if (user == null) return;
+        const pass = prompt('Hasło (zapisane lokalnie w TM):', this.cfg.pass || '');
+        if (pass == null) return;
+        const enabled = confirm('Włączyć auto-logowanie? OK = TAK, Anuluj = NIE');
+        this.cfg = { user, pass, enabled };
+        alert('Zapisano. Auto-logowanie: ' + (enabled ? 'WŁĄCZONE' : 'WYŁĄCZONE'));
+      });
+      GM_registerMenuCommand('CPT: Wyłącz auto-logowanie', () => {
+        this.cfg = { ...this.cfg, enabled: false };
+        alert('Auto-logowanie WYŁĄCZONE');
+      });
+    },
+    isSigninPage() { return /\/ap\/signin/i.test(location.pathname); },
+    looksLoggedOutOnApp() {
+      const hasMainTable = !!document.querySelector('table');
+      const signWords = document.body && /sign[\s-]*in|zaloguj/i.test(document.body.innerText || '');
+      return !hasMainTable && signWords;
+    },
+    ensureSessionOrRedirect() {
+      if (this.cfg.enabled && !this.isSigninPage() && this.looksLoggedOutOnApp()) {
+        location.href = 'https://www.amazonlogistics.eu/ap/signin';
+        return false;
+      }
+      return true;
+    },
+    async autologinOnSignin() {
+      if (!this.isSigninPage()) return false;
+      const { enabled, user, pass } = this.cfg;
+      if (!enabled || !user || !pass) return false;
+      for (let i = 0; i < 40; i++) { if (document.querySelector('#ap_email, input[type="email"]')) break; await sleep(250); }
+      const email = document.querySelector('#ap_email, input[type="email"]');
+      const pwd = document.querySelector('#ap_password, input[type="password"]');
+      const submit = document.querySelector('#signInSubmit, input[type="submit"][name="signIn"], button[type="submit"]');
+      if (!email || !submit) return false;
+      if (email && !/disabled/i.test(email.getAttribute('disabled') || '')) {
+        email.value = user; email.dispatchEvent(new Event('input', { bubbles: true }));
+        const cont = document.querySelector('#continue, input#continue, button[name="continue"]');
+        if (cont && !pwd) { cont.click(); for (let i = 0; i < 40; i++) { if (document.querySelector('#ap_password, input[type="password"]')) break; await sleep(250); } }
+      }
+      const pwd2 = document.querySelector('#ap_password, input[type="password"]');
+      if (pwd2) { pwd2.value = pass; pwd2.dispatchEvent(new Event('input', { bubbles: true })); }
+      const submit2 = document.querySelector('#signInSubmit, input[type="submit"][name="signIn"], button[type="submit"]');
+      if (submit2) submit2.click();
+      const returnUrl = 'https://www.amazonlogistics.eu/ssp/dock/hrz/cpt';
+      const timeout = Date.now() + 20000;
+      while (Date.now() < timeout) { await sleep(500); if (!this.isSigninPage()) break; }
+      if (location.href !== returnUrl) location.href = returnUrl;
+      return true;
+    }
+  };
+  Login.setupMenu();
+
+  /***** UI *****/
+  function ensureDash(){
+    let d = document.getElementById('cptDash');
+    if (!d){
+      d = document.createElement('div');
+      d.id = 'cptDash';
+      d.innerHTML = `
+<div id="cptKPIs">
+  <div class="kpiMini" id="kpiLaneALeft">
+    <span class="label">Lane A</span>
+    <div class="value" id="kpiLaneAVal">—</div>
+  </div>
+  <div class="kpi">
+    <span class="label">Total Packages</span>
+    <div class="value" id="kpiTotal">—</div>
+
+  </div>
+  <div class="kpi">
+  <span class="label">Scanned on shift</span>
+  <div class="value" id="kpiFlowrate">—</div>
+  <div class="label" id="kpiFlowrateSub" style="margin-top:.4em;font-size:var(--fs-small);opacity:.85">
+    —
+  </div>
+</div>
+  <div class="kpiMini" id="kpiLaneBRight">
+    <span class="label">Lane B</span>
+    <div class="value" id="kpiLaneBVal">—</div>
+  </div>
+</div>
+<div id="cptCardsWrap">
+  <div id="cptUnknownAlert" hidden></div>
+  <div id="cptCards" class="cards" aria-label="Lista kafelkĂłw Lane/Packages"></div>
+</div>`;
+      document.body.appendChild(d);
+    }
+    return d;
+  }
+
+  /***** Table helpers *****/
+  function findMainTable(){
+    return Array.from(document.querySelectorAll('table'))
+      .find(t => Array.from(t.querySelectorAll('thead th')).some(th => /lane/i.test(norm(th.textContent))));
+  }
+  function buildHeaderGrid(table){
+    const rows = [...table.querySelectorAll('thead tr')];
+    if (!rows.length) return {leaves:[], groups:[]};
+    const last = rows.at(-1);
+    let cols = 0;
+    for (const th of last.children) cols += +(th.getAttribute('colspan') || 1);
+    const grid = Array.from({length: rows.length}, () => Array(cols).fill(null));
+    for (let r=0; r<rows.length; r++){
+      let cIndex = 0;
+      for (const cell of rows[r].children){
+        while(grid[r][cIndex]) cIndex++;
+        const rs = +(cell.getAttribute('rowspan') || 1);
+        const cs = +(cell.getAttribute('colspan') || 1);
+        for (let rr=0; rr<rs; rr++){
+          for (let cc=0; cc<cs; cc++){
+            grid[r+rr][cIndex+cc] = { text: norm(cell.textContent) };
+          }
+        }
+        cIndex += cs;
+      }
+    }
+    const leaves = grid.at(-1).map((c,i)=>({colIndex:i,text:c?.text||''}));
+    const groups = leaves.map(leaf=>{
+      const path=[]; for(let r=0;r<grid.length;r++){
+        const n=grid[r][leaf.colIndex]; if(!n) continue;
+        if(!path.length || path.at(-1)!==n.text) path.push(n.text);
+      }
+      return{colIndex:leaf.colIndex,path,pathLower:path.map(x=>x.toLowerCase())};
+    });
+    return {leaves,groups};
+  }
+  function findLaneCol(table){
+    const {groups} = buildHeaderGrid(table);
+    for(const g of groups){ if(g.pathLower.some(x=>x.includes('lane'))) return g.colIndex; }
+    return -1;
+  }
+  function findTimeLeftCol(table){
+    const {groups} = buildHeaderGrid(table);
+    for (const g of groups){
+      const leaf = (g.path.at(-1) || '');
+      const any = g.path.join(' ');
+      if (/\btime\s*left\b/i.test(leaf) || /\btime\s*left\b/i.test(any)) return g.colIndex;
+    }
+    return -1;
+  }
+  function findCPTsCol(table){
+    const { groups } = buildHeaderGrid(table);
+    for (const g of groups){
+      const leaf = (g.path.at(-1) || '').toLowerCase();
+      if (leaf.includes('cpts')) return g.colIndex;
+    }
+    return -1;
+  }
+
+  function parseTimeLeftToMinutes(text){
+    let t = String(text || '').trim();
+    if (!t) return null;
+    const hasMinus = /^[-\u2212]/.test(t) || /\blate\b/i.test(t);
+    t = t.replace(/\blate\b/ig, '').replace(/^[-\u2212]\s*/, '').trim();
+    let m = t.match(/^(\d{1,2}):(\d{2})(?::(\d{2}))?$/);
+    if (m){
+      const h = parseInt(m[1],10)||0, mm = parseInt(m[2],10)||0, ss = parseInt(m[3]||'0',10)||0;
+      const mins = h*60 + mm + Math.floor(ss/60);
+      return hasMinus ? -mins : mins;
+    }
+    let days=0,hours=0,mins=0, left=t;
+    m = left.match(/(\d+)\s*d/i); if (m){ days=parseInt(m[1],10)||0; left=left.replace(m[0],''); }
+    m = left.match(/(\d+)\s*h/i); if (m){ hours=parseInt(m[1],10)||0; left=left.replace(m[0],''); }
+    m = left.match(/(\d+)\s*m(in)?/i); if (m){ mins=parseInt(m[1],10)||0; left=left.replace(m[0],''); }
+    if (days||hours||mins){
+      const total = days*24*60 + hours*60 + mins;
+      return hasMinus ? -total : total;
+    }
+    m = t.match(/^(\d+)\s*$/);
+    if (m){
+      const total = parseInt(m[1],10)||0;
+      return hasMinus ? -total : total;
+    }
+    return null;
+  }
+  function fmtMinutesHuman(mins){
+    if (mins == null) return '—';
+    const neg = mins < 0;
+    const abs = Math.abs(mins);
+    const d = Math.floor(abs / (24*60));
+    const h = Math.floor((abs % (24*60)) / 60);
+    const m = abs % 60;
+    const core = d ? `${d}d ${h}h ${m}m` : (h ? `${h}h ${m}m` : `${m}m`);
+    return neg ? `${core} Late` : core;
+  }
+
+  /***** Detect P metrics & roles *****/
+  function detectPMetrics(table){
+    const {groups} = buildHeaderGrid(table);
+    const rows = [...table.querySelectorAll('tbody tr')];
+    const sample = rows.slice(0,20);
+    const metrics = [];
+    for(const g of groups){
+      const leaf = g.path.at(-1) || '';
+      if(/^c:?$/i.test(leaf)) continue;
+      if(/^p:?$/i.test(leaf)){ metrics.push({...g,mode:'pLeaf',label:g.path.join('_')+'_P'}); continue; }
+      let mixed=0,checked=0;
+      for(const r of sample){
+        const c=r.querySelectorAll('td,th')[g.colIndex]; if(!c) continue;
+        const txt=norm(c.textContent); checked++; if(/P\s*:/.test(txt)) mixed++;
+      }
+      if(checked && mixed/checked>=0.3){ metrics.push({...g,mode:'mixed',label:g.path.join('_')+'_P'}); }
+    }
+    for(const m of metrics){
+      const path=(m.pathLower||[]).join(' '); let role=null;
+      if(/\ball\b/.test(path)) role='ALL';
+      if(/\bdivert/.test(path)) role='DIVERTED';
+      if(/\bcontainer/.test(path)) role='CONTAINERIZED';
+      if(/\bstaged\b/.test(path)) role='STAGED';
+      if(/\bloaded/.test(path)) role='LOADED';
+      if(/\bready\s*to\s*depart\b/.test(path)) role='READY_TO_DEPART';
+      if(/\bdeparted\b/.test(path)) role='DEPARTED';
+      m.role=role; m.normKey=(m.label||'').toLowerCase().replace(/[^a-z0-9]+/g,'_').replace(/^_|_$/g,'');
+    }
+    return metrics;
+  }
+
+  /***** Aggregate (z Time Left) *****/
+  function aggregate(table,laneCol,metrics,timeLeftCol){
+    const cptsCol = findCPTsCol(table);
+    const rows=[...table.querySelectorAll('tbody tr')];
+    const map=new Map(); const totals={};
+    for(const r of rows){
+      const cells=r.querySelectorAll('td,th');
+      if(!cells[laneCol]) continue;
+      const laneLabel = fullLaneLabelFromCell(cells[laneCol].textContent);
+      if(!laneLabel) continue;
+      let dateText='';
+      if (cptsCol>=0 && cells[cptsCol]){ dateText = norm(cells[cptsCol].textContent); }
+      const groupKey = dateText ? `${laneLabel} \n${dateText}` : laneLabel;
+      let rowObj=map.get(groupKey);
+      if(!rowObj){rowObj={__lane: laneLabel, __date: dateText}; map.set(groupKey,rowObj);}
+      for(const m of metrics){
+        const cell=cells[m.colIndex]; if(!cell) continue;
+        const txt=norm(cell.textContent);
+        let val=m.mode==='pLeaf'?toInt(txt):parseP(txt);
+        if(!val && /P\s*:/.test(txt)) val=parseP(txt);
+        rowObj[m.normKey]=(rowObj[m.normKey]||0)+val;
+        totals[m.normKey]=(totals[m.normKey]||0)+val;
+      }
+      if (typeof timeLeftCol === 'number' && timeLeftCol >= 0){
+        const tlCell = cells[timeLeftCol];
+        if (tlCell){
+          const tlText = norm(tlCell.textContent);
+          const tlMin = parseTimeLeftToMinutes(tlText);
+          if (tlMin != null){
+            rowObj.__minTL = (typeof rowObj.__minTL === 'number') ? Math.min(rowObj.__minTL, tlMin) : tlMin;
+          }
+        }
+      }
+    }
+    return {entries:[...map.entries()], totals, metrics};
+  }
+
+  /***** Packages formula *****/
+  function computePackages(agg){
+    const role = (r)=>agg.metrics.find(m=>m.role===r);
+    const ALL = role('ALL'),
+          DIV = role('DIVERTED'),
+          CON = role('CONTAINERIZED'),
+          STG = role('STAGED'),
+          LOD = role('LOADED'),
+          RTD = role('READY_TO_DEPART');
+    const KEY='all_remaining_p';
+    if(!ALL) return{rows:[],totals:{},key:KEY,have:false};
+    for(const[,obj] of agg.entries){
+      const all=obj[ALL.normKey]||0;
+      const sum = (DIV?obj[DIV.normKey]||0:0) + (CON?obj[CON.normKey]||0:0) + (STG?obj[STG.normKey]||0:0) + (LOD?obj[LOD.normKey]||0:0) + (RTD?obj[RTD.normKey]||0:0);
+      obj[KEY] = all - sum;
+    }
+    agg.totals[KEY] = (agg.totals[ALL.normKey]||0) - ((DIV?agg.totals[DIV.normKey]||0:0) + (CON?agg.totals[CON.normKey]||0:0) + (STG?agg.totals[STG.normKey]||0:0) + (LOD?agg.totals[LOD.normKey]||0:0) + (RTD?agg.totals[RTD.normKey]||0:0));
+    const rowsArr = agg.entries;
+    return{rows:rowsArr,totals:agg.totals,key:KEY,have:true};
+  }
+
+  /***** KPI / animacje *****/
+  function animateCount(el, to, duration = 200) {
+    if (!el) return;
+    const from = parseInt((el.dataset.prevValue || '0'), 10) || 0;
+    const start = performance.now(); const diff = (to - from);
+    function tick(now) {
+      const t = Math.min(1, (now - start) / duration);
+      const eased = t < 0.5 ? 2*t*t : -1 + (4 - 2*t)*t;
+      const val = Math.round(from + diff * eased);
+      el.textContent = val.toLocaleString('pl-PL');
+      if (t < 1) requestAnimationFrame(tick); else el.dataset.prevValue = String(to);
+    }
+    requestAnimationFrame(tick);
+  }
+  function updateKPI(totalVal, maxLaneVal) {
+    const totalEl = document.getElementById('kpiTotal');
+
+    animateCount(totalEl, totalVal);
+    const denom = Math.max(1, maxLaneVal || 1);
+    const pct = Math.min(100, Math.round((totalVal / denom) * 100));
+
+  }
+  function updateLaneKPIs(sumA, sumB) {
+    animateCount(document.getElementById('kpiLaneAVal'), sumA);
+    animateCount(document.getElementById('kpiLaneBVal'), sumB);
+  }
+
+  /***** Dopasowanie wysokości *****/
+  function needsTightMode() { return false; }
+  function fitTilesToViewport() {
+    const root = document.getElementById('cptDash'); if (!root) return;
+    root.classList.remove('tightTiles');
+  }
+
+
+
+
+/***** Lane A/B/X – reguły z aktualnej tabeli VisualSortationMarker *****/
+
+/*
+ * Źródło: live StackingFilter / VisualSortationMarker z 09.11.2026.
+ * Pierwsza litera markera wyznacza stronę (np. A166 -> A, B112 -> B).
+ * Kolejność ma znaczenie: wyjątki DR/PXD muszą być przed regułą bazową.
+ */
+const LANE_RULES = [
+  // Wyjątki zależne od wariantu kierunku
+  { side: 'B', re: /^DTM9-(?:DR2|PXD)(?:-|$)/ },
+  { side: 'A', re: /^DTM9-DR1(?:-|$)/ },
+  { side: 'B', re: /^NUE9-DR2(?:-|$)/ },
+  { side: 'A', re: /^NUE9-DR1(?:-|$)/ },
+  { side: 'B', re: /^NUE9-ATPOST[_-]KALSDORF[_-]AT-CC(?:-|$)/ },
+  { side: 'A', re: /^NUE9-ATPO-KALSDORF-AT(?:-|$)/ },
+  { side: 'A', re: /^BER8-DR1(?:-|$)/ },
+  { side: 'B', re: /^BER8-DR2(?:-|$)/ },
+  { side: 'B', re: /^HAJ8-DR1(?:-|$)/ },
+  { side: 'A', re: /^HAJ8-DR2(?:-|$)/ },
+  { side: 'A', re: /^PRG9-DR1(?:-|$)/ },
+  { side: 'B', re: /^PRG9-DR2(?:-|$)/ },
+
+  // Kierunki bazowe strony A
+  { side: 'A', re: /^(?:DTM9|MHG9|NUE9|HAJ8|HHN9|LIL8)(?:-|$)/ },
+  { side: 'A', re: /^(?:POPL)(?:-|$)/ },
+  { side: 'A', re: /^DE\d+-DEPO(?:-|$)/ },
+  { side: 'A', re: /^DEPO(?:-|$)/ },
+  { side: 'A', re: /^AMZL-(?:DNW4|DBY8|DBY5)-ND(?:-|$)/ },
+
+  // Kierunki bazowe strony B
+  { side: 'B', re: /^(?:DTM8|MHG7|LEJ7|BER8|PRG9|MUC7|FRAX)(?:-|$)/ },
+  { side: 'B', re: /^UPS(?:-|$)/ },
+  { side: 'B', re: /^DP\d+-DP(?:-|$)/ },
+  { side: 'B', re: /^DP-DE-H1(?:-|$)/ }
+];
+
+// agresywna normalizacja (ODM-proof)
+function normalizeLaneText(str) {
+  return String(str || '')
+    .normalize('NFKD')
+    .replace(/[^\x00-\x7E]/g, '')        // wywala dziwne unicode
+    .replace(/[\u200B-\u200F\uFEFF]/g, '') // zero-width
+    .replace(/[–—−]/g, '-')              // różne myślniki
+    .replace(/\s+/g, '')                 // ODM czasem dodaje spacje
+    .toUpperCase()
+    .trim();
+}
+
+// usuwa TYLKO prefixy, suffixy zostają
+function stripLanePrefix(afterArrow) {
+  return afterArrow.replace(/^(LH|CC)[-_]?/i, '');
+}
+
+function extractLaneKey(fullLaneSanitized) {
+  // groupKey zawiera po znaku nowej linii datę CPT – nie może brać udziału w dopasowaniu
+  const pureLane = String(fullLaneSanitized || '').split('\n')[0].trim();
+  const afterRaw = laneAfterArrow(sanitizeLaneStrong(pureLane));
+  const stripped = stripLanePrefix(afterRaw);
+  return normalizeLaneText(stripped);
+}
+
+function getLaneType(fullLaneSanitized) {
+  const laneKey = extractLaneKey(fullLaneSanitized);
+  const match = LANE_RULES.find(rule => rule.re.test(laneKey));
+
+  return match ? match.side : '?';
+}
+
+function isLaneA(fullLaneSanitized) {
+  return getLaneType(fullLaneSanitized) === 'A';
+}
+
+function updateUnknownAlert(unknownRows, unknownPackages) {
+  const alertEl = document.getElementById('cptUnknownAlert');
+  if (!alertEl) return;
+  if (!unknownRows.length) {
+    alertEl.hidden = true;
+    alertEl.textContent = '';
+    return;
+  }
+  const names = [...new Set(unknownRows.map(([lane]) => displayLaneLabel(String(lane).split('\n')[0])))];
+  alertEl.textContent = `⚠ Nieprzypisane: ${fmt(unknownPackages)} P — ${names.join(', ')}`;
+  alertEl.hidden = false;
+  console.warn('[Ship Dashboard] Nieznane kierunki A/B:', names);
+}
+
+
+// --- KPI A/B badge creator (shared look with tile badges) ---
+function ensureKpiBadges(){
+  const a = document.getElementById('kpiLaneALeft');
+  const b = document.getElementById('kpiLaneBRight');
+  if(a && !a.querySelector('.cpt-badge')){
+    const ba = document.createElement('div');
+    ba.className='cpt-badge A'; ba.textContent='A'; ba.setAttribute('aria-label','Lane A');
+    ba.style.position='absolute'; ba.style.top='8px'; ba.style.right='10px'; ba.style.zIndex='20';
+    ba.style.fontWeight='1000'; ba.style.fontSize='22px'; ba.style.lineHeight='1';
+    ba.style.padding='.12em .5em';
+ba.style.borderRadius = '8px';
+ba.style.border = '3px solid #0ea85a';
+ba.style.background = '#0ea85a';
+ba.style.textShadow = '0 1px 2px rgba(0,0,0,.8)';
+
+    ba.style.boxShadow='0 0 0 3px rgba(14,168,90,.35), 0 10px 22px rgba(14,168,90,.35)';
+    a.appendChild(ba);
+  }
+  if(b && !b.querySelector('.cpt-badge')){
+    const bb = document.createElement('div');
+    bb.className='cpt-badge B'; bb.textContent='B'; bb.setAttribute('aria-label','Lane B');
+    bb.style.position='absolute'; bb.style.top='8px'; bb.style.right='10px'; bb.style.zIndex='20';
+    bb.style.fontWeight='1000'; bb.style.fontSize='22px'; bb.style.lineHeight='1';
+    bb.style.padding='.12em .5em';
+bb.style.borderRadius = '8px';
+bb.style.border = '3px solid #0b74ff';
+bb.style.background = '#0b74ff';
+bb.style.textShadow = '0 1px 2px rgba(0,0,0,.8)';
+
+    bb.style.boxShadow='0 0 0 3px rgba(11,116,255,.35), 0 10px 22px rgba(11,116,255,.35)';
+    b.appendChild(bb);
+  }
+}
+
+function renderDash(data){
+    ensureDash(); ensureKpiBadges();
+    const cards = document.getElementById('cptCards');
+    cards.innerHTML='';
+    if(!data.have){ updateKPI(0,0); updateLaneKPIs(0,0); drawSpark('sparkA', [], '--accent'); drawSpark('sparkB', [], '--accent2'); return; }
+    const rowsNonZero = data.rows.filter(([, o]) => (o[data.key] || 0) > 0);
+    updateFlowrateKPI();
+    let sumA=0,sumB=0,sumUnknown=0;
+    const unknownRows=[];
+    for(const [laneLabel,obj] of rowsNonZero){
+      const val = obj[data.key] || 0;
+      const laneType = getLaneType(laneLabel);
+      if (laneType === 'A') sumA += val;
+      else if (laneType === 'B') sumB += val;
+      else { sumUnknown += val; unknownRows.push([laneLabel, obj]); }
+    }
+    updateUnknownAlert(unknownRows, sumUnknown);
+    const maxVal = Math.max(...rowsNonZero.map(([,o]) => o[data.key]||0), 1);
+    const totalVal = rowsNonZero.reduce((acc,[,o]) => acc + (o[data.key]||0), 0);
+    updateKPI(totalVal, maxVal);
+    updateLaneKPIs(sumA, sumB);
+
+    // Trend (1 próbka na jedno odświeżenie strony)
+    //if (!window._trendPushedThisLoad){ Trend.push(sumA,sumB); window._trendPushedThisLoad = true; }
+   // const tdata = Trend.data;
+   // drawSpark('sparkA', tdata.A, '--accent');
+   // drawSpark('sparkB', tdata.B, '--accent2');
+
+    const isUrgent = (tl) => (tl != null && tl < 60 && tl >= -900);
+    const urgent = [], others = [];
+    for (const entry of rowsNonZero){
+      const tlMin = (typeof entry[1].__minTL === 'number') ? entry[1].__minTL : null;
+      (isUrgent(tlMin) ? urgent : others).push(entry);
+    }
+    urgent.sort((a, b) => { const ta = (a[1].__minTL ?? Number.POSITIVE_INFINITY); const tb = (b[1].__minTL ?? Number.POSITIVE_INFINITY); return ta - tb; });
+    others.sort((a, b) => { const ta = (a[1].__minTL ?? Number.POSITIVE_INFINITY); const tb = (b[1].__minTL ?? Number.POSITIVE_INFINITY); return ta - tb; });
+    const sortedRows = urgent.concat(others);
+
+    const limited = sortedRows.slice(0,12);
+    for(const [laneLabel,obj] of limited){
+      const val = obj[data.key] || 0;
+      const tlMin = (typeof obj.__minTL === 'number') ? obj.__minTL : null;
+      const card = document.createElement('div'); card.className = 'cpt-card';
+      if (isUrgent(tlMin)) card.classList.add('urgent');
+      const lane = document.createElement('div'); lane.className = 'lane';
+      const pureLane = laneLabel.split("\n")[0].trim();
+      lane.textContent = displayLaneLabel(pureLane);
+      const valEl= document.createElement('div'); valEl.className = 'val';
+      valEl.textContent = fmt(val);
+      const timeEl = document.createElement('div'); timeEl.className = 'time';
+      timeEl.textContent = (tlMin != null && tlMin < 0) ? fmtMinutesHuman(tlMin) : `Time Left: ${fmtMinutesHuman(tlMin)}`;
+      const barWrap = document.createElement('div'); barWrap.className = 'barWrap';
+      const bar = document.createElement('div'); bar.className = 'bar';
+      bar.style.width = `${Math.min(100, (val / maxVal) * 100)}%`;
+      barWrap.appendChild(bar);
+      card.appendChild(lane);
+      card.appendChild(valEl);
+      card.appendChild(timeEl);
+      card.appendChild(barWrap);
+  // Badge A/B z twardymi stylami inline (gwarantowana widoczność)
+  const badge = document.createElement('div');
+const laneType = getLaneType(laneLabel);
+  badge.className = 'cpt-badge ' + (laneType === '?' ? 'unknown' : laneType);
+  badge.textContent = laneType;
+  badge.setAttribute('aria-label', 'Lane ' + laneType);
+  badge.style.position='absolute';
+  badge.style.top='6px';
+  badge.style.right='8px';
+  badge.style.zIndex='10';
+  badge.style.fontWeight='1000';
+  badge.style.fontSize='20px';
+  badge.style.lineHeight='1';
+  badge.style.padding='2px 8px';
+  badge.style.borderRadius='8px';
+  badge.style.border='2px solid #FFFFFF';
+  badge.style.background='rgba(0,0,0,.75)';
+  badge.style.color='#FFFFFF';
+    if(laneType==='A'){
+      badge.style.background='#0ea85a'; badge.style.border='3px solid #0ea85a';
+    } else if(laneType==='B') {
+      badge.style.background='#0b74ff'; badge.style.border='3px solid #0b74ff';
+    } else {
+      badge.style.background='#ffd43b'; badge.style.border='3px solid #ffd43b'; badge.style.color='#161616';
+    }
+  badge.style.textShadow='0 1px 2px rgba(0,0,0,.8)';
+  card.appendChild(badge);
+ cards.appendChild(card);
+    }
+    fitTilesToViewport();
+
+  }
+
+  /***** Main *****/
+  function recompute(){
+    try{
+      ensureDash();
+      const table=findMainTable(); if(!table) return;
+      const laneCol=findLaneCol(table); if(laneCol<0) return;
+      const timeLeftCol = findTimeLeftCol(table);
+      const metrics=detectPMetrics(table); if(!metrics.length) return;
+      const agg = aggregate(table,laneCol,metrics,timeLeftCol);
+      const data= computePackages(agg);
+      renderDash(data);
+    } catch (e) { console.warn('[CPT Tiles – TimeLeft/Late] Błąd recompute:', e); }
+  }
+
+  async function init(){
+    if (Login.isSigninPage()) { await Login.autologinOnSignin(); return; }
+    if (!Login.ensureSessionOrRedirect()) return;
+    for(let i=0;i<60;i++){ if(findMainTable()) break; await sleep(500); }
+    ensureDash(); ensureKpiBadges(); recompute(); // sprawdzaj Flowrate co minutę
+ensureFlowrateIfStale();
+setInterval(ensureFlowrateIfStale, 60_000);
+    const mo=new MutationObserver((mutList)=>{
+      const external = mutList.some(m => !(m.target && m.target.closest && m.target.closest('#cptDash')));
+      if(!external) return;
+      clearTimeout(window._cptDeb); window._cptDeb=setTimeout(recompute,300);
+    });
+    mo.observe(document.body,{childList:true,subtree:true});
+
+// ================= TV-SAFE REFRESH LOGIC =================
+function softRefreshAmazon() {
+  const btn = document.getElementById('btnPageRefresh');
+  if (btn) btn.click();
+}
+
+// co 30 s – soft refresh danych (bez migania TV)
+setInterval(() => {
+  softRefreshAmazon();
+}, 20000);
+
+// AWARYJNY HARD REFRESH co 60 min – ZAWSZE na CPT
+setInterval(() => {
+  location.href = "https://www.amazonlogistics.eu/ssp/dock/hrz/cpt";
+}, 15 * 60 * 1000);
+// ================= END TV-SAFE REFRESH ====================
+
+
+ // HARD REFRESH co 60 s
+  }
+function getFlowrateSnapshot() {
+  try {
+    return JSON.parse(localStorage.getItem('flowrate_snapshot'));
+  } catch {
+    return null;
+  }
+}
+``
+  if(document.readyState==='loading') document.addEventListener('DOMContentLoaded', init); else init();
+})();
